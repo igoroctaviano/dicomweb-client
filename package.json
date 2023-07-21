@@ -2,8 +2,7 @@
   "name": "dicomweb-client",
   "version": "0.8.4",
   "description": "Implementation of DICOMweb client code",
-  "main": "build/dicomweb-client.js",
-  "module": "build/dicomweb-client.es.js",
+  "main": "src/dicomweb-client.js",
   "types": "types/dicomweb-client.d.ts",
   "scripts": {
     "test": "./test_ci.sh",
