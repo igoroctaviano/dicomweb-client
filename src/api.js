@@ -54,13 +54,21 @@ const getFirstResult = result => result[0];
  * Error with which a request aborted through an AbortSignal rejects.
  *
  * @param {AbortSignal} signal - Aborted signal
- * @return {*} The signal's reason, or a DOMException named "AbortError"
+ * @return {*} The signal's reason, or an error named "AbortError" (a
+ *   DOMException where the environment provides one)
  */
 const getAbortReason = signal => {
   if (signal.reason !== undefined) {
     return signal.reason;
   }
-  return new DOMException('The operation was aborted.', 'AbortError');
+  const message = 'The operation was aborted.';
+  if (typeof DOMException === 'function') {
+    return new DOMException(message, 'AbortError');
+  }
+  /** Environments with AbortController but no global DOMException (e.g. Node 15-16) */
+  const error = new Error(message);
+  error.name = 'AbortError';
+  return error;
 };
 
 const MEDIATYPES = {
@@ -240,6 +248,8 @@ class DICOMwebClient {
     return new Promise((resolvePromise, rejectPromise) => {
       let resolve = resolvePromise;
       let reject = rejectPromise;
+      /** Removes the abort listener once one is added */
+      let releaseSignal = () => {};
       if (signal && signal.aborted) {
         reject(getAbortReason(signal));
         return;
@@ -327,6 +337,12 @@ class DICOMwebClient {
               console.error(error.response);
             }
 
+            /**
+             * The request has failed, not been aborted: an interceptor that
+             * aborts the signal must not replace this error with the abort
+             * reason.
+             */
+            releaseSignal();
             try {
               errorInterceptor(error);
             } finally {
@@ -343,6 +359,13 @@ class DICOMwebClient {
       }
 
       if (requestHooks && areValidRequestHooks(requestHooks)) {
+        const originalInstance = requestInstance;
+        const handlers = {
+          onloadstart: originalInstance.onloadstart,
+          onloadend: originalInstance.onloadend,
+          onreadystatechange: originalInstance.onreadystatechange,
+          onprogress: originalInstance.onprogress,
+        };
         const combinedHeaders = Object.assign({}, headers, this.headers);
         const metadata = { method, url, headers: combinedHeaders };
         if (signal) {
@@ -353,6 +376,18 @@ class DICOMwebClient {
           functions.reduce((props, fn) => fn(props, metadata), args);
         const pipedRequest = pipeRequestHooks(requestHooks);
         requestInstance = pipedRequest(requestInstance);
+        if (requestInstance !== originalInstance) {
+          /**
+           * A hook returned a different request object. Give it the response
+           * handlers, which were set on the original before the hooks ran (so
+           * hooks can wrap them), unless the hook set its own.
+           */
+          Object.keys(handlers).forEach(key => {
+            if (handlers[key] && !requestInstance[key]) {
+              requestInstance[key] = handlers[key];
+            }
+          });
+        }
       }
 
       // Add withCredentials to request if needed
@@ -372,12 +407,22 @@ class DICOMwebClient {
          */
         const sentInstance = requestInstance;
         const onAbort = () => {
-          sentInstance.abort();
+          /** Reject first so the promise settles even if abort() throws */
           reject(getAbortReason(signal));
+          try {
+            sentInstance.abort();
+          } catch (error) {
+            if (this.verbose) {
+              console.warn('failed to abort request: ', error);
+            }
+          }
         };
         signal.addEventListener('abort', onAbort, { once: true });
-        const settle = callback => value => {
+        releaseSignal = () => {
           signal.removeEventListener('abort', onAbort);
+        };
+        const settle = callback => value => {
+          releaseSignal();
           callback(value);
         };
         resolve = settle(resolve);

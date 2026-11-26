@@ -292,4 +292,154 @@ describe('Request abort signal cleanup', function() {
     }
     expect(error.status).toBe(500);
   });
+
+  it('rejects with the HTTP error when the errorInterceptor aborts the signal', async function() {
+    const controller = new AbortController();
+    const errorInterceptor = jasmine
+      .createSpy('errorInterceptor')
+      .and.callFake(() => controller.abort());
+    const dwc = new DICOMwebClient.api.DICOMwebClient({
+      url,
+      verbose: false,
+      errorInterceptor,
+    });
+    const instance = new FakeXMLHttpRequest();
+    const promise = dwc.retrieveInstanceFrames({
+      ...frameOptions,
+      request: { instance, signal: controller.signal },
+    });
+    instance.respond(401, null);
+    let error;
+    try {
+      await promise;
+    } catch (e) {
+      error = e;
+    }
+    expect(errorInterceptor).toHaveBeenCalled();
+    expect(error.status).toBe(401);
+    expect(instance.aborted).toBe(false);
+  });
+});
+
+describe('Request abort signal edge cases', function() {
+  const url = 'http://localhost:8008/dcm4chee-arc/aets/DCM4CHEE/rs';
+  const frameOptions = {
+    studyInstanceUID: '1.2.3',
+    seriesInstanceUID: '1.2.3.4',
+    sopInstanceUID: '1.2.3.4.5',
+    frameNumbers: [1],
+  };
+
+  it('rejects on abort even when abort() of the sent request throws', async function() {
+    const replacement = new FakeXMLHttpRequest();
+    replacement.abort = () => {
+      throw new Error('abort failed');
+    };
+    const requestHook = jasmine
+      .createSpy('requestHook', function(request, metadata) {
+        return request;
+      })
+      .and.callFake(() => replacement);
+    const dwc = new DICOMwebClient.api.DICOMwebClient({
+      url,
+      verbose: false,
+      requestHooks: [requestHook],
+    });
+    const controller = new AbortController();
+    const promise = dwc.retrieveInstanceFrames({
+      ...frameOptions,
+      request: { instance: new FakeXMLHttpRequest(), signal: controller.signal },
+    });
+    controller.abort();
+    let error;
+    try {
+      await promise;
+    } catch (e) {
+      error = e;
+    }
+    expect(error.name).toBe('AbortError');
+  });
+
+  it('rejects with an AbortError where DOMException is not available', async function() {
+    const dwc = new DICOMwebClient.api.DICOMwebClient({ url, verbose: false });
+    const instance = new FakeXMLHttpRequest();
+    /** An aborted signal without a reason, as in environments predating AbortSignal.reason */
+    const signal = {
+      aborted: true,
+      reason: undefined,
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    const savedDOMException = window.DOMException;
+    let error;
+    window.DOMException = undefined;
+    try {
+      await dwc.retrieveInstanceFrames({
+        ...frameOptions,
+        request: { instance, signal },
+      });
+    } catch (e) {
+      error = e;
+    } finally {
+      window.DOMException = savedDOMException;
+    }
+    expect(error instanceof Error).toBe(true);
+    expect(error.name).toBe('AbortError');
+    expect(instance.sent).toBe(false);
+  });
+
+  it('resolves through a request object returned by a request hook', async function() {
+    const replacement = new FakeXMLHttpRequest();
+    replacement.responseType = 'arraybuffer';
+    const requestHook = jasmine
+      .createSpy('requestHook', function(request, metadata) {
+        return request;
+      })
+      .and.callFake(() => replacement);
+    const dwc = new DICOMwebClient.api.DICOMwebClient({
+      url,
+      verbose: false,
+      requestHooks: [requestHook],
+    });
+    const promise = dwc.retrieveInstanceFrames({
+      ...frameOptions,
+      request: { instance: new FakeXMLHttpRequest() },
+    });
+    expect(replacement.sent).toBe(true);
+    const body = new ArrayBuffer(4);
+    replacement.respond(200, body);
+    const frames = await promise;
+    expect(frames[0]).toBe(body);
+  });
+
+  it('keeps a handler that a request hook wraps on the same request object', async function() {
+    const wrapped = jasmine.createSpy('wrappedReadyStateChange');
+    const requestHook = jasmine
+      .createSpy('requestHook', function(request, metadata) {
+        return request;
+      })
+      .and.callFake(request => {
+        const previous = request.onreadystatechange;
+        request.onreadystatechange = function() {
+          wrapped();
+          previous.call(request);
+        };
+        return request;
+      });
+    const dwc = new DICOMwebClient.api.DICOMwebClient({
+      url,
+      verbose: false,
+      requestHooks: [requestHook],
+    });
+    const instance = new FakeXMLHttpRequest();
+    const promise = dwc.retrieveInstanceFrames({
+      ...frameOptions,
+      request: { instance },
+    });
+    const body = new ArrayBuffer(4);
+    instance.respond(200, body);
+    const frames = await promise;
+    expect(wrapped).toHaveBeenCalled();
+    expect(frames[0]).toBe(body);
+  });
 });
