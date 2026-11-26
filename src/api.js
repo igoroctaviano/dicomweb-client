@@ -33,7 +33,8 @@ function areValidRequestHooks(requestHooks) {
  * @property {string} [responseType] - The response type of the request.
  * @property {boolean} [withCredentials] - Whether to include credentials in the request.
  * @property {AbortSignal} [signal] - Aborts the request. The returned promise then rejects
- *   with `signal.reason` (a DOMException named "AbortError" by default) and the
+ *   with `signal.reason`, or, when the signal has no reason, with an error named
+ *   "AbortError" (a DOMException where the environment provides one). The
  *   `errorInterceptor` is not called.
  */
 
@@ -94,9 +95,20 @@ let debugLog = () => {};
  * A callback with the request instance and metadata information
  * of the currently request being executed that should necessarily
  * return the given request optionally modified.
+ *
+ * The request it receives is already opened, with the request headers and
+ * `responseType` set and the client's event handlers attached; a hook may wrap
+ * those handlers. A hook that returns a different XMLHttpRequest must open and
+ * configure that object itself (method, URL, headers and `responseType`): the
+ * client only gives it the event handlers it does not already have.
  * @typedef {function} RequestHook
  * @param {XMLHttpRequest} request - The original XMLHttpRequest instance.
  * @param {object} metadata - The metadata used by the request.
+ * @param {string} metadata.method - HTTP method
+ * @param {string} metadata.url - URL of the request
+ * @param {Object} metadata.headers - Request headers, including the client's headers
+ * @param {AbortSignal} [metadata.signal] - The request's abort signal, only present
+ *   when one was given
  */
 
 /**
