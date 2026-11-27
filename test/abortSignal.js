@@ -442,4 +442,71 @@ describe('Request abort signal edge cases', function() {
     expect(wrapped).toHaveBeenCalled();
     expect(frames[0]).toBe(body);
   });
+
+  it('aborts a retry that a request hook sends on the same request object', async function() {
+    const errorInterceptor = jasmine.createSpy('errorInterceptor');
+    let sendCount = 0;
+    let pendingRetry = null;
+    /**
+     * Retry hook in the style of a viewer's: it keeps the request object,
+     * wraps send(), holds back a 503 from the client's handler and sends the
+     * same object again.
+     */
+    const retryHook = jasmine
+      .createSpy('retryHook', function(request, metadata) {
+        return request;
+      })
+      .and.callFake((request, metadata) => {
+        const originalSend = request.send;
+        request.send = function(...args) {
+          const downstream = request.onreadystatechange;
+          const attempt = () => {
+            request.onreadystatechange = function() {
+              if (request.readyState !== 4) {
+                return;
+              }
+              if (request.status === 503 && sendCount < 3) {
+                pendingRetry = () => {
+                  pendingRetry = null;
+                  request.open(metadata.method, metadata.url, true);
+                  attempt();
+                };
+                return;
+              }
+              downstream.call(request);
+            };
+            sendCount += 1;
+            originalSend.apply(request, args);
+          };
+          attempt();
+        };
+        return request;
+      });
+    const dwc = new DICOMwebClient.api.DICOMwebClient({
+      url,
+      verbose: false,
+      errorInterceptor,
+      requestHooks: [retryHook],
+    });
+    const instance = new FakeXMLHttpRequest();
+    const controller = new AbortController();
+    const promise = dwc.retrieveInstanceFrames({
+      ...frameOptions,
+      request: { instance, signal: controller.signal },
+    });
+    instance.respond(503, null);
+    expect(pendingRetry).not.toBeNull();
+    pendingRetry();
+    expect(sendCount).toBe(2);
+    controller.abort();
+    let error;
+    try {
+      await promise;
+    } catch (e) {
+      error = e;
+    }
+    expect(error.name).toBe('AbortError');
+    expect(instance.aborted).toBe(true);
+    expect(errorInterceptor).not.toHaveBeenCalled();
+  });
 });
